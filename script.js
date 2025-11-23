@@ -103,74 +103,58 @@ class SquareFrameProcessor {
         try {
             // Show loading state
             this.showProcessingSection();
-            this.originalInfo.innerHTML = '<strong>Converting HEIC file...</strong><br><small>Trying multiple conversion methods</small>';
+            this.originalInfo.innerHTML = '<strong>Converting HEIC file...</strong><br><small>Using heic-to library (iOS 18 compatible)</small>';
             
             console.log('Starting HEIC conversion for file:', file.name, 'Size:', file.size);
             
             // Check file size first (very large files often fail)
-            if (file.size > 15 * 1024 * 1024) { // 15MB
-                throw new Error('File too large. HEIC files larger than 15MB are not supported. Please use a smaller image or convert manually.');
+            if (file.size > 20 * 1024 * 1024) { // 20MB (increased limit for heic-to)
+                throw new Error('File too large. HEIC files larger than 20MB are not supported. Please use a smaller image or convert manually.');
             }
             
             let convertedBlob;
             let conversionMethod = '';
             
-            // Method 1: Try the newer @alexcorvi/heic2any library first
+            // Method 1: Try heic-to library (best for iOS 18 compatibility)
             try {
-                if (typeof window.heic2any !== 'undefined') {
-                    console.log('Attempting conversion with @alexcorvi/heic2any...');
-                    convertedBlob = await window.heic2any({
+                if (typeof HeicTo !== 'undefined') {
+                    console.log('Attempting conversion with heic-to library...');
+                    
+                    // First check if it's actually a HEIC file
+                    const isHeicFile = await HeicTo.isHeic(file);
+                    if (!isHeicFile) {
+                        throw new Error('File is not a valid HEIC/HEIF format');
+                    }
+                    
+                    convertedBlob = await HeicTo({
                         blob: file,
-                        toType: 'image/jpeg',
+                        type: 'image/jpeg',
                         quality: 0.9
                     });
-                    conversionMethod = 'alexcorvi';
-                    console.log('HEIC conversion successful with @alexcorvi/heic2any');
+                    conversionMethod = 'heic-to';
+                    console.log('HEIC conversion successful with heic-to library');
                 } else {
-                    throw new Error('Library not available');
+                    throw new Error('heic-to library not available');
                 }
-            } catch (alexcorviError) {
-                console.log('@alexcorvi/heic2any failed:', alexcorviError.message);
+            } catch (heicToError) {
+                console.log('heic-to library failed:', heicToError.message);
                 
-                // Method 2: Try the original heic2any library
+                // Method 2: Fallback to browser decoding (for edge cases)
                 try {
-                    if (typeof heic2any !== 'undefined') {
-                        console.log('Attempting conversion with original heic2any...');
-                        convertedBlob = await heic2any({
-                            blob: file,
-                            toType: 'image/jpeg',
-                            quality: 0.8
-                        });
-                        conversionMethod = 'original';
-                        console.log('HEIC conversion successful with original heic2any');
-                    } else {
-                        throw new Error('Library not available');
-                    }
-                } catch (originalError) {
-                    console.log('Original heic2any failed:', originalError.message);
+                    console.log('Attempting direct browser decoding as fallback...');
+                    convertedBlob = await this.tryBrowserHeicDecoding(file);
+                    conversionMethod = 'browser';
+                    console.log('HEIC conversion successful with browser decoding');
+                } catch (browserError) {
+                    console.log('Browser decoding failed:', browserError.message);
                     
-                    // Method 3: Try using Canvas API with FileReader (for some HEIC files that browsers can decode)
-                    try {
-                        console.log('Attempting direct browser decoding...');
-                        convertedBlob = await this.tryBrowserHeicDecoding(file);
-                        conversionMethod = 'browser';
-                        console.log('HEIC conversion successful with browser decoding');
-                    } catch (browserError) {
-                        console.log('Browser decoding failed:', browserError.message);
-                        
-                        // If all methods fail, check if it's the format not supported error
-                        if (originalError.message && originalError.message.includes('format not supported')) {
-                            throw new Error('HEIC_FORMAT_NOT_SUPPORTED');
-                        } else {
-                            throw originalError;
-                        }
+                    // If all methods fail, provide specific error
+                    if (heicToError.message.includes('not a valid HEIC')) {
+                        throw new Error('HEIC_INVALID_FORMAT');
+                    } else {
+                        throw heicToError;
                     }
                 }
-            }
-            
-            // Handle array of blobs (in case multiple is true)
-            if (Array.isArray(convertedBlob)) {
-                convertedBlob = convertedBlob[0];
             }
             
             // Create a new File object from the converted blob
@@ -192,16 +176,16 @@ class SquareFrameProcessor {
                 stack: error.stack
             });
             
-            if (error.message === 'HEIC_FORMAT_NOT_SUPPORTED') {
+            if (error.message === 'HEIC_FORMAT_NOT_SUPPORTED' || error.message === 'HEIC_INVALID_FORMAT') {
                 this.showHeicFormatNotSupportedMessage();
-            } else if (error.message.includes('not loaded')) {
+            } else if (error.message.includes('not available') || error.message.includes('not loaded')) {
                 alert('HEIC conversion library failed to load. Please check your internet connection and reload the page.');
-            } else if (error.message.includes('fetch')) {
+            } else if (error.message.includes('fetch') || error.message.includes('network')) {
                 alert('Network error while loading HEIC conversion resources. Please check your internet connection and try again.');
             } else if (error.message.includes('too large')) {
                 alert(error.message);
             } else {
-                alert(`Failed to convert HEIC file: ${error.message}\n\nThis could be due to:\n• Unsupported HEIC variant\n• Corrupted file\n• Very large file size\n\nTry:\n• Converting to JPEG manually\n• Using a different HEIC file\n• Reducing file size`);
+                alert(`Failed to convert HEIC file: ${error.message}\n\nThis could be due to:\n• Unsupported HEIC variant\n• Corrupted file\n• Very large file size\n• iOS 18 compatibility issue\n\nTry:\n• Converting to JPEG manually on your device\n• Using a different HEIC file\n• Reducing file size`);
             }
             this.resetApp();
         }
@@ -253,12 +237,15 @@ class SquareFrameProcessor {
     }
 
     showHeicFormatNotSupportedMessage() {
-        const message = `This HEIC file format variant is not supported by the current conversion library.
+        const message = `This HEIC file format is not supported or may be corrupted.
 
-This often happens with:
-• Photos from newer iPhone models (iPhone 13+)
-• Photos with special encoding or Live Photos
-• HEIC files with advanced compression
+This can happen with:
+• Corrupted or incomplete HEIC files
+• Files that aren't actually HEIC format
+• Very old HEIC variants
+• Protected or DRM-encoded files
+
+Note: This app now uses the latest heic-to library with iOS 18 support!
 
 Solutions:
 1. Convert to JPEG on your iPhone:
@@ -272,8 +259,7 @@ Solutions:
 3. Use online conversion tools:
    • CloudConvert, Convertio, or similar services
 
-4. Use desktop software:
-   • Preview (Mac), Photos app, or image editing software
+4. Try a different HEIC file to test
 
 Would you like to try with a different image?`;
 
@@ -471,18 +457,10 @@ Would you like to try with a different image?`;
 document.addEventListener('DOMContentLoaded', () => {
     // Check if HEIC libraries are available
     setTimeout(() => {
-        const libraries = [];
-        if (typeof heic2any !== 'undefined') {
-            libraries.push('heic2any (original)');
-        }
-        if (typeof window.heic2any !== 'undefined') {
-            libraries.push('@alexcorvi/heic2any');
-        }
-        
-        if (libraries.length > 0) {
-            console.log('HEIC conversion libraries loaded:', libraries.join(', '));
+        if (typeof HeicTo !== 'undefined') {
+            console.log('HEIC conversion library loaded: heic-to (iOS 18 compatible)');
         } else {
-            console.warn('No HEIC conversion libraries available');
+            console.warn('heic-to library not available - HEIC conversion will not work');
         }
     }, 2000);
     
